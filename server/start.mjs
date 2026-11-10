@@ -1,0 +1,12 @@
+import {stateDirectory,frontendDirectory} from './paths.mjs';
+import {mkdir} from 'node:fs/promises';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {openDatabase} from './database.mjs';
+import {createApi} from './http.mjs';
+if(process.env.NODE_ENV==='production')throw Error('El despliegue de producción requiere completar la configuración de identidad, HTTPS y operación con TI.');
+const localDir=stateDirectory('development');await mkdir(localDir,{recursive:true});
+const db=await openDatabase({filename:path.join(localDir,'development.sqlite'),databaseURL:process.env.DATABASE_URL});
+const port=Number(process.env.API_PORT||8091);if(!Number.isInteger(port)||port<1||port>65535)throw Error('Puerto inválido.');
+const api=await createApi({db,port,staticRoot:await frontendDirectory()});console.log('Aplicación y backend local:',api.url,'| Base:',db.dialect,'| Sin usuarios de ejemplo ni migración del navegador.');
+for(const signal of ['SIGINT','SIGTERM'])process.once(signal,async()=>{await api.close();await db.close();process.exit(0)});

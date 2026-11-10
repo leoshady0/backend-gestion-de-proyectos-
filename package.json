@@ -1,0 +1,17 @@
+{
+  "name": "gestion-proyectos-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API local de gestión de proyectos con roles y autorizaciones",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server/start.mjs",
+    "check": "node scripts/check.mjs",
+    "bootstrap": "node server/bootstrap.mjs",
+    "demo": "node server/demo.mjs",
+    "test": "node --test scripts/test-backend.mjs",
+    "test:connected": "node --test scripts/test-connected.mjs"
+  }
+}
