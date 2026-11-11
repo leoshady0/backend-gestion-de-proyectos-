@@ -27,13 +27,13 @@ Para probar sin importar ni modificar los registros existentes:
 node server/demo.mjs
 ```
 
-Abrir `http://127.0.0.1:8092/`. Esta instancia usa exclusivamente `BACKEND_STATE_DIR/demo/demo.sqlite`, fuera del repositorio. Genera tres cuentas de prueba (administrador, responsable y consulta) con contraseñas aleatorias. Los accesos se entregan en `BACKEND_STATE_DIR/demo/Cuentas-de-prueba.md`, también fuera del repositorio. No copiar ese archivo a Git ni reutilizar las claves. Al reiniciar se conservan las cuentas y los cambios de la demostración; no se vuelve a sembrar una base existente.
+Abrir `http://127.0.0.1:8092/` o `http://127.0.0.1:8092/mobile-preview`. Esta instancia usa exclusivamente `BACKEND_STATE_DIR/demo/demo.sqlite`, fuera del repositorio. Genera tres cuentas de prueba (administrador, responsable y consulta) con contraseñas aleatorias. Los accesos se entregan en `BACKEND_STATE_DIR/demo/Cuentas-de-prueba.md`, también fuera del repositorio. No copiar ese archivo a Git ni reutilizar las claves. Al reiniciar se conservan las cuentas y los cambios de la demostración; no se vuelve a sembrar una base existente.
 
 La interfaz conectada usa cookies de sesión y CSRF con la API en el mismo origen. No guarda una copia de los proyectos en localStorage ni IndexedDB. Abrir varias pestañas del mismo navegador comparte la sesión: cerrar sesión antes de probar otro perfil. Para sesiones simultáneas independientes usar perfiles de navegador separados.
 
 Se pueden probar proyectos, tareas, edición de estado y responsable, solicitudes de creación y eliminación, aprobación/rechazo, usuarios y perfiles, consulta de auditoría, registro de gastos, conclusión, actividades de cronograma y PDF general basado en el snapshot del servidor. El móvil limita a tres tareas por proyecto en la vista general de tareas y permite abrir el detalle completo.
 
-Los editores conectados de comparativos, versiones de cronograma, papelera y biblioteca de documentos aún requieren ampliación. La subida de adjuntos no está disponible en esta instancia. La interfaz original conserva sus funciones y almacenamiento separados en el puerto 8090. La demostración está limitada a loopback, no permite `DATABASE_URL` ni modo producción y no implica despliegue, acceso desde otros equipos o instalación como PWA.
+Los editores conectados de comparativos, versiones de cronograma, papelera y biblioteca de documentos aún requieren ampliación. En Costos, administradores y responsables pueden adjuntar comprobantes PDF o Excel a gastos registrados, con un límite de 10 MB por archivo. Todos los perfiles con acceso al proyecto pueden descargarlos. La base guarda tanto los comprobantes como sus datos de identificación. La interfaz original conserva sus funciones y almacenamiento separados en el puerto 8090. La demostración está limitada a loopback, no permite `DATABASE_URL` ni modo producción y no implica despliegue, acceso desde otros equipos o instalación como PWA.
 
 Pruebas adicionales de recursos públicos, aislamiento y persistencia: `node --test scripts/test-connected.mjs`.
 
@@ -84,7 +84,7 @@ Crear proyecto: `{name,description?,due_date?}`. Tareas: `{name,description?,sta
 
 Solicitar creación: `{kind:"create",project:{name,description?,due_date?},reason}`. Solicitar eliminación: `{kind:"delete",project_id,reason}`. Los parámetros escritos con `?` en este documento son opcionales, no parte del nombre JSON.
 
-En cronograma/costos, el primer `PUT` usa versión 0; los siguientes deben usar la versión recibida. El payload admite los campos validados en `validateRecord` de `service.mjs`, compatibles con el contenido principal de los módulos existentes. Historial completo de versiones del cronograma y archivos adjuntos requieren endpoints adicionales antes de conectar o migrar el frontend.
+En cronograma/costos, el primer `PUT` usa versión 0; los siguientes deben usar la versión recibida. El payload admite los campos validados en `validateRecord` de `service.mjs`, compatibles con el contenido principal de los módulos existentes. El historial del cronograma y los comprobantes de gastos tienen rutas propias. El GET de costos incluye la lista de comprobantes sin su contenido.
 
 ## Seguridad implementada y límites
 
@@ -100,6 +100,6 @@ En cronograma/costos, el primer `PUT` usa versión 0; los siguientes deben usar 
 
 `database.mjs` separa el acceso a datos. Si se establece `DATABASE_URL`, carga el driver `pg` y aplica migraciones versionadas compatibles de `migrations/001-initial.sql`. El driver no se instaló ni se ejecutó contra PostgreSQL en esta PC. Instalarlo con el gestor autorizado, fijar su versión y generar lockfile antes de usar esa opción. No desactivar la validación TLS; TI debe proveer la configuración y CA correspondientes. La base SQLite local no se copia automáticamente a PostgreSQL.
 
-Antes de producción faltan: probar esquema, migraciones y concurrencia en PostgreSQL real; integrar identidad corporativa; configurar HTTPS/cookies Secure/proxy; implementar almacenamiento privado de archivos, escaneo de cargas y límites; definir respaldos de base y adjuntos y ensayar su restauración; retención, monitoreo y alertas; límites de peticiones distribuidos y pruebas de seguridad; completar los editores conectados de documentos, comparativos y versiones del cronograma, y hacer una migración explícita con verificación y posibilidad de reversión. No se ofrece todavía un endpoint para subir documentos ni se transfieren archivos del navegador.
+Antes de producción faltan: probar esquema, migraciones y concurrencia en PostgreSQL real; integrar identidad corporativa; configurar HTTPS/cookies Secure/proxy; evaluar el almacenamiento de archivos y escaneo de cargas para producción; definir respaldos de base y adjuntos y ensayar su restauración; retención, monitoreo y alertas; límites de peticiones distribuidos y pruebas de seguridad; completar los editores conectados de documentos, comparativos y versiones del cronograma, y hacer una migración explícita con verificación y posibilidad de reversión. Los comprobantes de gastos se adjuntan desde la interfaz conectada. Los archivos de la aplicación local original no se transfieren automáticamente.
 
 No ejecutar despliegues ni subir código automáticamente. Ninguna credencial, base local, respaldo o archivo de negocio debe entrar en Git.

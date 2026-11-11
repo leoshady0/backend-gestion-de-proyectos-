@@ -37,6 +37,8 @@ La eliminación archiva los registros. Un administrador puede restaurar proyecto
 
 DATABASE_URL selecciona PostgreSQL en el arranque normal. Requiere instalar y fijar el driver pg con el gestor aprobado por TI y validar TLS. No se instaló ese driver ni se probó contra PostgreSQL real en esta etapa. Las migraciones SQL están en server/migrations. La demostración rechaza DATABASE_URL y NODE_ENV=production. Los comandos normales también rechazan producción hasta completar identidad corporativa, HTTPS y operación.
 
-Pendientes: identidad corporativa/MFA, almacenamiento privado y escaneo de adjuntos, respaldos y restauración ensayada, monitoreo, PostgreSQL real, editores avanzados y migración explícita de datos. El frontend original conserva sus datos en su propio navegador; esta API no los importa ni borra.
+El cronograma registra cada guardado y conserva el contenido de las últimas 15 versiones para exportación. Solo un administrador puede editar el presupuesto aprobado. Los administradores y responsables pueden adjuntar comprobantes PDF o Excel a gastos existentes. Los comprobantes se guardan con el gasto en la base de datos y se descargan con sesión iniciada.
+
+Pendientes: identidad corporativa/MFA, escaneo de archivos para producción, respaldos y restauración ensayada, monitoreo, PostgreSQL real y migración explícita de datos. El frontend original conserva sus datos en su propio navegador; esta API no los importa ni borra.
 
 Más detalles de endpoints y controles en server/README.md. Solo se guarda código: no bases, credenciales, sesiones, accesos de prueba, adjuntos ni datos reales. No desplegar ni subir cambios sin autorización.

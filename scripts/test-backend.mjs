@@ -68,12 +68,57 @@ test('Backend: autenticación, permisos, aprobaciones, concurrencia y conservaci
   assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/costs`,{version:0,payload:costs})).status,409);
   const bad=structuredClone(costs);bad.expenses[0].amount=-1;assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/costs`,{version:1,payload:bad})).status,400);
   assert.equal((await call(reader,'GET',`/api/projects/${p.id}/costs`)).body.payload.currency,'PYG');
+  const costsUrl='/api/projects/'+p.id+'/costs';
+  const approvedQuote={id:'quote-test',concept:'Materiales ficticios',amount:180000,date:'2026-11-10',category:'Base',approved:true};
+  assert.equal((await call(manager,'PUT',costsUrl,{version:1,payload:{...costs,quotes:[approvedQuote]}})).status,403);
+  assert.equal((await call(manager,'PUT',costsUrl,{version:1,payload:{...costs,approvedBudget:0}})).status,403);
+  assert.equal((await call(a,'PUT',costsUrl,{version:1,payload:{...costs,approvedBudget:-1}})).status,400);
+  const withBudget={...costs,approvedBudget:0};
+  assert.equal((await call(a,'PUT',costsUrl,{version:1,payload:withBudget})).status,200);
+  assert.equal((await call(manager,'PUT',costsUrl,{version:2,payload:costs})).status,403);
+  assert.equal((await call(manager,'PUT',costsUrl,{version:2,payload:{...withBudget,currency:'USD'}})).status,403);
+  assert.equal((await call(manager,'PUT',costsUrl,{version:2,payload:{...withBudget,expenses:[]}})).status,200);
+  assert.equal((await call(a,'PUT',costsUrl,{version:3,payload:{...withBudget,expenses:[],approvedBudget:200000}})).status,200);
+  assert.equal((await call(reader,'GET',costsUrl)).body.payload.approvedBudget,200000);
+  const budgetAudit=(await call(a,'GET','/api/audit')).body.find(event=>event.action==='costs.budget_updated'&&JSON.parse(event.details).amount===200000);
+  assert.equal(budgetAudit.entity_id,p.id);
+  assert.deepEqual(JSON.parse(budgetAudit.details),{previous_amount:0,previous_currency:'PYG',amount:200000,currency:'PYG'});
+
   assert.equal((await call(manager,'POST','/api/expenses/x/approve',{})).status,404);
  });
  await t.test('Cronogramas y control de versión',async()=>{
   const schedule={start:'2026-11-01',unit:'days',calendarDays:10,rows:[{id:'r1',name:'Actividad ficticia',group:false,activeDays:[1,2]}],incidents:[]};
   assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version:0,payload:schedule})).status,200);
   const bad=structuredClone(schedule);bad.rows[0].activeDays=[11];assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version:1,payload:bad})).status,400);
+  const updated=structuredClone(schedule);
+  updated.calendarDays=24;
+  updated.rows[0].activeDays=Array.from({length:18},(_,index)=>index+3);
+  updated.rows[0].status='delayed';
+  updated.incidents=[{id:'incident-1',type:'delay',activityId:'r1',date:'2026-11-12',text:'Demora de prueba',author:manager.user.name}];
+  const invalid=structuredClone(updated);invalid.incidents[0].activityId='missing';
+  assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version:1,payload:invalid})).status,400);
+  assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version:1,payload:updated})).status,200);
+  assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version:1,payload:schedule})).status,409);
+  const saved=(await call(manager,'GET',`/api/projects/${p.id}/schedule`)).body;
+  assert.deepEqual(saved.payload,updated);
+  assert.deepEqual(saved.history.map(entry=>entry.version),[2,1]);
+  assert(saved.history.every(entry=>entry.author_name===manager.user.name&&Number(entry.saved_at)>0));
+  assert.equal((await call(reader,'GET',`/api/projects/${p.id}/schedule/versions/1`)).body.payload.rows[0].activeDays.length,2);
+  updated.rows.unshift({id:'civil',name:'Trabajos civiles',group:true,activeDays:[]});
+  updated.rows[1].groupId='civil';
+  const invalidGroup=structuredClone(updated);invalidGroup.rows[1].groupId='missing';
+  assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version:2,payload:invalidGroup})).status,400);
+  for(let version=2;version<17;version++){
+   updated.rows[1].name='Actividad de la versión '+(version+1);
+   assert.equal((await call(manager,'PUT',`/api/projects/${p.id}/schedule`,{version,payload:updated})).status,200);
+  }
+  const retained=(await call(reader,'GET',`/api/projects/${p.id}/schedule`)).body.history;
+  assert.equal(retained.length,17);
+  assert.deepEqual(retained.filter(entry=>entry.has_snapshot).map(entry=>entry.version),Array.from({length:15},(_,index)=>17-index));
+  assert.equal((await call(reader,'GET',`/api/projects/${p.id}/schedule/versions/2`)).status,404);
+  const oldest=(await call(reader,'GET',`/api/projects/${p.id}/schedule/versions/3`)).body;
+  assert.equal(oldest.payload.rows[1].name,'Actividad de la versión 3');
+  assert.equal(oldest.payload.rows[1].groupId,'civil');
  });
  await t.test('Eliminación requiere permiso; solicitud caduca si el proyecto cambia',async()=>{
   const current=(await call(a,'GET',`/api/projects/${p.id}`)).body;

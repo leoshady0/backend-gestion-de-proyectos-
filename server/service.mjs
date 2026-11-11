@@ -1,6 +1,23 @@
 import {randomUUID} from 'node:crypto';
 import {allow,roles,fields,text,email,day,version,fail,passwordHash,publicUser,isUniqueError} from './security.mjs';
 const editors=['admin','responsable'];
+const scheduleSnapshotLimit=15;
+const attachmentTypes={
+ pdf:{mediaType:'application/pdf',signature:'255044462d'},
+ xlsx:{mediaType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',signature:'504b0304',member:Buffer.from('xl/workbook.xml')},
+ xls:{mediaType:'application/vnd.ms-excel',signature:'d0cf11e0a1b11ae1',member:Buffer.from('Workbook','utf16le'),alternate:Buffer.from('Book','utf16le')}
+};
+function expenseAttachmentType(name,content){
+ const extension=name.split('.').pop().toLowerCase();
+ if(!name.includes('.')||!Object.hasOwn(attachmentTypes,extension)||!Buffer.isBuffer(content))fail(415,'Elegí un archivo PDF o Excel (.xlsx o .xls).');
+ const {mediaType,signature,member,alternate}=attachmentTypes[extension];
+ if(content.subarray(0,signature.length/2).toString('hex')!==signature||
+    (member&&!content.includes(member)&&!(alternate&&content.includes(alternate))))fail(415,'El contenido del archivo no coincide con su formato PDF o Excel.');
+ return mediaType;
+}
+function expenseAttachments(db,projectId){
+ return db.query('SELECT id,expense_id,name,category,size_bytes,created_at FROM expense_attachments WHERE project_id=? ORDER BY created_at,id',[projectId]);
+}
 const one=async(db,sql,args=[])=>{const row=(await db.query(sql,args))[0];if(!row)fail(404,'Registro no encontrado.');return row};
 export async function audit(db,user,action,type,id,details={}){await db.query('INSERT INTO audit_events (id,actor_id,action,entity_type,entity_id,details,created_at) VALUES (?,?,?,?,?,?,?)',[randomUUID(),user?.id||null,action,type,id,JSON.stringify(details),Date.now()]);}
 function projectInput(body){fields(body,['name','description','due_date']);return {name:text(body.name,'nombre',160,true),description:text(body.description??'','descripción',5000),due_date:day(body.due_date)}}
@@ -37,12 +54,66 @@ export async function service(db,user,method,path,body){
     if(method==='GET')return db.query('SELECT * FROM tasks WHERE project_id=? AND deleted_at IS NULL ORDER BY created_at',[id]);
     if(method==='POST'){allow(user,editors);const t=await taskInput(db,body),tid=randomUUID();await db.query('INSERT INTO tasks (id,project_id,name,description,status,priority,owner_id,due_date,created_at) VALUES (?,?,?,?,?,?,?,?,?)',[tid,id,t.name,t.description,t.status,t.priority,t.owner_id,t.due_date,Date.now()]);await touchProject(db,id);await audit(db,user,'task.created','task',tid,{project_id:id});return one(db,'SELECT * FROM tasks WHERE id=?',[tid])}
    }
-   if(child==='closure'&&method==='GET'&&parts.length===3){const tasks=await db.query('SELECT * FROM tasks WHERE project_id=? AND deleted_at IS NULL',[id]);if(!tasks.length||tasks.some(t=>t.status!=='done'))fail(409,'Completa todas las tareas antes del cierre.');await audit(db,user,'project.closure_snapshot','project',id);return {project:p,tasks,records:(await db.query('SELECT * FROM project_records WHERE project_id=?',[id])).map(r=>({...r,payload:JSON.parse(r.payload)})),generated_at:new Date().toISOString()}}
+   if(child==='closure'&&method==='GET'&&parts.length===3){const tasks=await db.query('SELECT * FROM tasks WHERE project_id=? AND deleted_at IS NULL',[id]);if(!tasks.length||tasks.some(t=>t.status!=='done'))fail(409,'Completa todas las tareas antes del cierre.');await audit(db,user,'project.closure_snapshot','project',id);return {project:p,tasks,records:(await db.query('SELECT * FROM project_records WHERE project_id=?',[id])).map(r=>({...r,payload:JSON.parse(r.payload)})),attachments:await expenseAttachments(db,id),generated_at:new Date().toISOString()}}
+   if(child==='schedule'&&parts[3]==='versions'&&parts.length===5&&method==='GET'){
+    const requestedVersion=Number(parts[4]);
+    if(!/^\d+$/.test(parts[4])||!Number.isSafeInteger(requestedVersion)||requestedVersion<1)fail(400,'Versión inválida.');
+    const saved=await one(db,'SELECT version, author_name, saved_at, payload FROM schedule_saves WHERE project_id=? AND version=?',[id,requestedVersion]);
+    if(saved.payload===null)fail(404,'Esta versión solo conserva el registro de actualización.');
+    return {...saved,project_name:p.name,payload:JSON.parse(saved.payload)};
+   }
+   if(child==='costs'&&parts[3]==='attachments'){
+    if(method==='GET'&&parts.length===5)return one(db,'SELECT name,media_type,content FROM expense_attachments WHERE project_id=? AND id=?',[id,parts[4]]);
+    if(method==='POST'&&parts.length===4){
+     allow(user,editors);
+     const expenseId=body.expenseId;
+     const [record]=await db.query("SELECT payload FROM project_records WHERE project_id=? AND kind='costs'",[id]);
+     if(!record||!JSON.parse(record.payload).expenses.some(expense=>expense.id===expenseId))fail(404,'El gasto no existe en este proyecto.');
+     const name=text(body.name,'nombre del archivo',240,true),{category,content}=body;
+     if(/[\u0000-\u001f\u007f/\\]/u.test(name))fail(400,'Nombre de archivo inválido.');
+     if(!['Comparativo','Factura','Otro'].includes(category))fail(400,'Tipo de comprobante inválido.');
+     const mediaType=expenseAttachmentType(name,content);
+     const attachmentId=randomUUID(),createdAt=Date.now();
+     await db.query('INSERT INTO expense_attachments (id,project_id,expense_id,name,category,media_type,size_bytes,content,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',[attachmentId,id,expenseId,name,category,mediaType,content.length,content,user.id,createdAt]);
+     await touchProject(db,id);
+     await audit(db,user,'costs.attachment_added','project',id,{expense_id:expenseId,attachment_id:attachmentId,category});
+     return {id:attachmentId,expense_id:expenseId,name,category,size_bytes:content.length,created_at:createdAt};
+    }
+   }
    if(['schedule','costs'].includes(child)&&parts.length===3){
-    if(method==='GET'){const rows=await db.query('SELECT * FROM project_records WHERE project_id=? AND kind=?',[id,child]);return rows[0]?{...rows[0],payload:JSON.parse(rows[0].payload)}:{payload:null,version:0}}
-    if(method==='PUT'){allow(user,editors);fields(body,['version','payload']);if(!Number.isInteger(body.version)||body.version<0)fail(400,'Versión inválida.');validateRecord(child,body.payload);const existing=(await db.query('SELECT version FROM project_records WHERE project_id=? AND kind=?',[id,child]))[0];if((existing?.version??0)!==body.version)fail(409,'El registro cambió. Recargá antes de guardar.');
-     const payload=JSON.stringify(body.payload);if(existing){const rows=await db.query('UPDATE project_records SET payload=?,version=version+1,updated_by=?,updated_at=? WHERE project_id=? AND kind=? AND version=? RETURNING version',[payload,user.id,Date.now(),id,child,body.version]);if(!rows.length)fail(409,'El registro cambió.')}else{try{await db.query('INSERT INTO project_records (project_id,kind,payload,updated_by,updated_at) VALUES (?,?,?,?,?)',[id,child,payload,user.id,Date.now()])}catch(e){if(isUniqueError(e))fail(409,'El registro cambió.');throw e}}
-     await touchProject(db,id);await audit(db,user,'record.updated',child,id);return {version:body.version+1,payload:body.payload};
+    if(method==='GET'){
+     const [row]=await db.query('SELECT * FROM project_records WHERE project_id=? AND kind=?',[id,child]);
+     const record=row?{...row,payload:JSON.parse(row.payload)}:{payload:null,version:0};
+     if(child==='schedule')record.history=await db.query('SELECT version, author_name, saved_at, CASE WHEN payload IS NULL THEN 0 ELSE 1 END AS has_snapshot FROM schedule_saves WHERE project_id=? ORDER BY version DESC',[id]);
+     if(child==='costs')record.attachments=await expenseAttachments(db,id);
+     return record;
+    }
+    if(method==='PUT'){allow(user,editors);fields(body,['version','payload']);if(!Number.isInteger(body.version)||body.version<0)fail(400,'Versión inválida.');validateRecord(child,body.payload);const existing=(await db.query('SELECT version, payload FROM project_records WHERE project_id=? AND kind=?',[id,child]))[0];if((existing?.version??0)!==body.version)fail(409,'El registro cambió. Recargá antes de guardar.');
+     let budgetChange;
+     if(child==='costs'){
+      const previous=existing?JSON.parse(existing.payload):null;
+      const next=body.payload;
+      const expenseIds=new Set(next.expenses.map(expense=>expense.id));
+      if(previous?.expenses.some(expense=>!expenseIds.has(expense.id))){
+       const linked=await db.query('SELECT DISTINCT expense_id FROM expense_attachments WHERE project_id=?',[id]);
+       if(linked.some(attachment=>!expenseIds.has(attachment.expense_id)))fail(409,'El gasto tiene comprobantes asociados.');
+      }
+      const before=approvedBudget(previous), after=approvedBudget(next);
+      const previousCurrency=previous?.currency??next.currency;
+      if(previous?.approvedBudget!==next.approvedBudget||before!==after||((before!==0||previous?.approvedBudget!==undefined)&&previousCurrency!==next.currency)){
+       if(user.role!=='admin')fail(403,'Solo un administrador puede modificar el presupuesto aprobado.');
+       budgetChange={previous_amount:before,previous_currency:previousCurrency,amount:after,currency:next.currency};
+      }
+     }
+     const payload=JSON.stringify(body.payload), savedAt=Date.now(), nextVersion=body.version+1;
+     if(existing){const rows=await db.query('UPDATE project_records SET payload=?,version=version+1,updated_by=?,updated_at=? WHERE project_id=? AND kind=? AND version=? RETURNING version',[payload,user.id,savedAt,id,child,body.version]);if(!rows.length)fail(409,'El registro cambió.')}else{try{await db.query('INSERT INTO project_records (project_id,kind,payload,updated_by,updated_at) VALUES (?,?,?,?,?)',[id,child,payload,user.id,savedAt])}catch(e){if(isUniqueError(e))fail(409,'El registro cambió.');throw e}}
+     if(child==='schedule'){
+      await db.query('INSERT INTO schedule_saves (project_id,version,author_name,saved_at,payload) VALUES (?,?,?,?,?)',[id,nextVersion,user.name,savedAt,payload]);
+      await db.query('UPDATE schedule_saves SET payload=NULL WHERE project_id=? AND version<=? AND payload IS NOT NULL',[id,nextVersion-scheduleSnapshotLimit]);
+     }
+     await touchProject(db,id);await audit(db,user,'record.updated',child,id);
+     if(budgetChange)await audit(db,user,'costs.budget_updated','project',id,budgetChange);
+     return {version:nextVersion,payload:body.payload};
     }
    }
   }
@@ -66,9 +137,14 @@ export async function service(db,user,method,path,body){
  fail(404,'Ruta no encontrada.');
 }
 async function taskInput(db,body,merged=false){if(!merged)fields(body,['name','description','status','priority','owner_id','due_date']);const status=body.status??'todo',priority=body.priority??'Media';if(!['todo','doing','done'].includes(status)||!['Alta','Media','Baja'].includes(priority))fail(400,'Estado o prioridad inválidos.');let owner=body.owner_id??null;if(owner!==null){text(owner,'responsable',100,true);await one(db,'SELECT id FROM users WHERE id=? AND active=1',[owner])}return {name:text(body.name,'nombre',160,true),description:text(body.description??'','descripción',5000),status,priority,owner_id:owner,due_date:day(body.due_date)}}
+function approvedBudget(costs){
+ return costs?.approvedBudget??(costs?.quotes.reduce((cents,quote)=>cents+(quote.approved?Math.round(quote.amount*100):0),0)??0)/100;
+}
 function validateRecord(kind,payload){
  if(kind==='costs'){
-  fields(payload,['currency','quotes','expenses','suppliers','conclusion']);if(!['PYG','USD','EUR','ARS','BRL'].includes(payload.currency))fail(400,'Moneda inválida.');text(payload.conclusion??'','conclusión',5000);
+  fields(payload,['currency','quotes','expenses','suppliers','conclusion','approvedBudget']);if(!['PYG','USD','EUR','ARS','BRL'].includes(payload.currency))fail(400,'Moneda inválida.');text(payload.conclusion??'','conclusión',5000);
+  const budget=payload.approvedBudget;
+  if(budget!==undefined&&(!Number.isFinite(budget)||budget<0||budget>1e12||Math.abs(budget*100-Math.round(budget*100))>.01))fail(400,'Presupuesto aprobado inválido.');
   for(const key of ['quotes','expenses','suppliers'])if(!Array.isArray(payload[key])||payload[key].length>1000)fail(400,'Listado inválido.');
   const ids=new Set();for(const [key,rows] of [['quotes',payload.quotes],['expenses',payload.expenses],['suppliers',payload.suppliers]])for(const row of rows){const id=text(row.id,'id',100,true);if(ids.has(id))fail(400,'Identificador duplicado.');ids.add(id);
    if(key==='suppliers'){fields(row,['id','name','taxId','contact']);text(row.name,'proveedor',120,true);text(row.taxId??'','identificación',60);text(row.contact??'','contacto',160);continue}
@@ -77,7 +153,33 @@ function validateRecord(kind,payload){
   const approved=new Set();for(const row of payload.quotes.filter(q=>q.approved)){const k=row.category+'|'+row.concept.trim().toLowerCase();if(approved.has(k))fail(400,'Solo una cotización seleccionada por concepto y categoría.');approved.add(k)}
  }else{
   fields(payload,['start','unit','calendarDays','weeks','rows','incidents']);day(payload.start);if(!['days','weeks'].includes(payload.unit)||!Number.isInteger(payload.calendarDays)||payload.calendarDays<1||payload.calendarDays>3660||!Array.isArray(payload.rows)||payload.rows.length>500||!Array.isArray(payload.incidents)||payload.incidents.length>2000)fail(400,'Cronograma inválido.');
-  const ids=new Set();for(const row of payload.rows){fields(row,['id','name','group','activeDays','active']);const id=text(row.id,'id',100,true);if(ids.has(id))fail(400,'Actividad duplicada.');ids.add(id);text(row.name,'actividad',200,true);if(typeof row.group!=='boolean'||!Array.isArray(row.activeDays)||row.activeDays.length>3660||row.activeDays.some(d=>!Number.isInteger(d)||d<1||d>payload.calendarDays)||new Set(row.activeDays).size!==row.activeDays.length)fail(400,'Días de actividad inválidos.');}
-  for(const event of payload.incidents){fields(event,['id','date','type','text','author','createdAt']);text(event.id,'id',100,true);day(event.date);if(!['rain','delay','change','note'].includes(event.type))fail(400,'Incidencia inválida.');text(event.text,'detalle',3000,true);text(event.author,'autor',120,true)}
+  const ids=new Set(), activityIds=new Set(), groupIds=new Set();
+  for(const row of payload.rows){
+   fields(row,['id','name','group','activeDays','active','status','groupId']);
+   const id=text(row.id,'id',100,true);
+   if(ids.has(id))fail(400,'Actividad duplicada.');
+   ids.add(id);
+   text(row.name,'actividad',200,true);
+   if(typeof row.group!=='boolean'||!Array.isArray(row.activeDays)||row.activeDays.length>3660||row.activeDays.some(d=>!Number.isInteger(d)||d<1||d>payload.calendarDays)||new Set(row.activeDays).size!==row.activeDays.length)fail(400,'Días de actividad inválidos.');
+   if(row.status!==undefined&&!['todo','doing','done','delayed'].includes(row.status))fail(400,'Estado de actividad inválido.');
+   if(row.group)groupIds.add(id);
+   else activityIds.add(id);
+  }
+  for(const row of payload.rows){
+   if(row.groupId==null)continue;
+   if(row.group||!groupIds.has(row.groupId))fail(400,'El rubro de la actividad no existe en este cronograma.');
+  }
+  const incidentIds=new Set();
+  for(const event of payload.incidents){
+   fields(event,['id','date','type','text','author','createdAt','activityId']);
+   const id=text(event.id,'id',100,true);
+   if(incidentIds.has(id))fail(400,'Incidencia duplicada.');
+   incidentIds.add(id);
+   day(event.date);
+   if(!['rain','delay','incident','change','note'].includes(event.type))fail(400,'Incidencia inválida.');
+   if(event.activityId!==undefined&&!activityIds.has(event.activityId))fail(400,'La actividad de la incidencia no existe en este cronograma.');
+   text(event.text,'detalle',3000,true);
+   text(event.author,'autor',120,true);
+  }
  }
 }
