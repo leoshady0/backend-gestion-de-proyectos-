@@ -8,5 +8,6 @@ if(process.env.NODE_ENV==='production')throw Error('El despliegue de producción
 const localDir=stateDirectory('development');await mkdir(localDir,{recursive:true});
 const db=await openDatabase({filename:path.join(localDir,'development.sqlite'),databaseURL:process.env.DATABASE_URL});
 const port=Number(process.env.API_PORT||8091);if(!Number.isInteger(port)||port<1||port>65535)throw Error('Puerto inválido.');
-const api=await createApi({db,port,staticRoot:await frontendDirectory()});console.log('Aplicación y backend local:',api.url,'| Base:',db.dialect,'| Sin usuarios de ejemplo ni migración del navegador.');
+const publicOrigin=process.env.PUBLIC_ORIGIN||undefined;if(publicOrigin){const u=new URL(publicOrigin);if(u.protocol!=='https:'||u.pathname!=='/'||u.search||u.hash||u.username)throw Error('PUBLIC_ORIGIN debe ser https://servidor, sin ruta.');}
+const api=await createApi({db,port,staticRoot:await frontendDirectory(),publicOrigin});console.log('Aplicación y backend local:',api.url,'| Base:',db.dialect,'| Sin usuarios de ejemplo ni migración del navegador.');
 for(const signal of ['SIGINT','SIGTERM'])process.once(signal,async()=>{await api.close();await db.close();process.exit(0)});

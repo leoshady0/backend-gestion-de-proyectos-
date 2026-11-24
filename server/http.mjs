@@ -15,7 +15,10 @@ async function readBody(req,limit,message){
 function attachmentHeader(req,key){
  try{return decodeURIComponent(req.headers[key]||'')}catch{fail(400,'Datos del adjunto inválidos.')}
 }
-export async function createApi({db,port=8091,staticRoot}){
+export async function createApi({db,port=8091,staticRoot,publicOrigin}){
+ // publicOrigin: origen HTTPS publicado por el proxy inverso local (p. ej. Caddy). Sin él, solo loopback.
+ const proxied=Boolean(publicOrigin),published=proxied?new URL(publicOrigin).origin:null;
+ const clientIp=req=>{if(!proxied)return req.socket.remoteAddress;const hops=String(req.headers['x-forwarded-for']||'').split(',').map(v=>v.trim()).filter(Boolean);return hops.at(-1)||req.socket.remoteAddress};
  // Local development only. Production exposure waits for IT's identity, TLS and hosting decisions.
  const dummyHash=await passwordHash(token());const attempts=new Map();
  const limit=key=>{const now=Date.now();for(const [k,v]of attempts)if(v.until<=now)attempts.delete(k);const item=attempts.get(key)||{count:0,until:now+15*60*1000};item.count++;attempts.set(key,item);if(item.count>10)fail(429,'Demasiados intentos. Intentá nuevamente en 15 minutos.');};
@@ -23,7 +26,7 @@ export async function createApi({db,port=8091,staticRoot}){
   const requestId=randomUUID();res.setHeader('X-Request-ID',requestId);res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Content-Security-Policy',"default-src 'none'; frame-ancestors 'none'");res.setHeader('Referrer-Policy','no-referrer');
   const send=(status,value)=>{res.writeHead(status);res.end(JSON.stringify(value))};
   try{
-   const origin='http://127.0.0.1:'+server.address().port;
+   const origin=published||'http://127.0.0.1:'+server.address().port;const secure=origin.startsWith('https:')?'; Secure':'';
    if(req.headers.host!==new URL(origin).host)fail(400,'Host no permitido.');
    if(req.headers.origin&&req.headers.origin!==origin||req.headers['sec-fetch-site']==='cross-site')fail(403,'Origen no permitido.');
    const url=new URL(req.url,origin);if(url.search)fail(400,'Esta API no acepta parámetros de consulta.');
@@ -50,11 +53,11 @@ export async function createApi({db,port=8091,staticRoot}){
     try{body=JSON.parse(bytes.toString('utf8'))}catch{fail(400,'JSON inválido.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Se requiere un objeto JSON.');
    }
    if(route==='/api/login'&&req.method==='POST'){
-    limit('ip:'+req.socket.remoteAddress);fields(body,['email','password']);const address=email(body.email);limit('account:'+digest(address));if(typeof body.password!=='string'||body.password.length>128)fail(401,'Correo o contraseña incorrectos.');
+    limit('ip:'+clientIp(req));fields(body,['email','password']);const address=email(body.email);limit('account:'+digest(address));if(typeof body.password!=='string'||body.password.length>128)fail(401,'Correo o contraseña incorrectos.');
     const user=(await db.query('SELECT * FROM users WHERE email=?',[address]))[0];const valid=await passwordVerify(body.password,user?.password_hash||dummyHash);if(!user||!user.active||!valid)fail(401,'Correo o contraseña incorrectos.');
     const raw=token(),csrf=digest('csrf:'+raw),expires=Date.now()+lifetime;
     await db.transaction(async tx=>{const live=(await tx.query('SELECT active,password_hash FROM users WHERE id=?',[user.id]))[0];if(!live?.active||live.password_hash!==user.password_hash)fail(401,'Correo o contraseña incorrectos.');await tx.query('DELETE FROM sessions WHERE expires_at<=?',[Date.now()]);await tx.query('INSERT INTO sessions (token_hash,user_id,csrf_hash,expires_at) VALUES (?,?,?,?)',[digest(raw),user.id,digest(csrf),expires]);await audit(tx,user,'session.created','user',user.id)});
-    res.setHeader('Set-Cookie',`sid=${raw}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${lifetime/1000}`);send(200,{user:publicUser(user),csrf_token:csrf,expires_at:expires});return;
+    res.setHeader('Set-Cookie',`sid=${raw}; HttpOnly${secure}; SameSite=Strict; Path=/api; Max-Age=${lifetime/1000}`);send(200,{user:publicUser(user),csrf_token:csrf,expires_at:expires});return;
    }
    const match=(req.headers.cookie||'').split(';').map(c=>c.trim()).filter(c=>c.startsWith('sid='));const raw=match.length===1?match[0].slice(4):'';if(!/^[A-Za-z0-9_-]{43}$/.test(raw))fail(401,'Iniciá sesión.');
    if(upload){
@@ -79,10 +82,10 @@ export async function createApi({db,port=8091,staticRoot}){
     res.setHeader('Content-Length',content.length);
     res.writeHead(200);res.end(content);return;
    }
-   if(route==='/api/logout')res.setHeader('Set-Cookie','sid=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0');send(200,result);
+   if(route==='/api/logout')res.setHeader('Set-Cookie','sid=; HttpOnly'+secure+'; SameSite=Strict; Path=/api; Max-Age=0');send(200,result);
   }catch(error){if(error instanceof ApiError){if(error.status===429)res.setHeader('Retry-After','900');send(error.status,{error:error.message,request_id:requestId})}else{console.error('API request failed',requestId,error.code||error.name);send(500,{error:'Error interno. No se guardaron los cambios de esta operación.',request_id:requestId})}}
  });
  server.requestTimeout=30000;server.headersTimeout=10000;server.maxHeadersCount=40;
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});
- return {server,url:'http://127.0.0.1:'+server.address().port,close:async()=>{server.closeIdleConnections();await new Promise((resolve,reject)=>server.close(e=>e?reject(e):resolve()))}};
+ return {server,url:published||'http://127.0.0.1:'+server.address().port,close:async()=>{server.closeIdleConnections();await new Promise((resolve,reject)=>server.close(e=>e?reject(e):resolve()))}};
 }
